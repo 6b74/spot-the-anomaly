@@ -554,6 +554,44 @@ const SCENARIOS = [
     ],
   },
 
+  /* ====== SCN-024 · PERSISTENCE · Reboot-Persistent Beacon ====== */
+  /* ====== SCN-PERSIST · PERSISTENCE · Reboot-Persistent Beacon ====== */
+  {
+    id: 'SCN-024',
+    title: 'Reboot-Persistent Beacon',
+    difficulty: 'EASY',
+    viewType: 'logs',
+    brief: 'Workstation <strong>10.10.30.14</strong> has come up in three separate daily triage sweeps, always for a single unfamiliar connection early in the morning. Pull three days of its logs, anchored on each boot, and figure out why the same destination keeps reappearing.',
+    rows: [
+      { time: '07:58:01', src: 'dhcp.log', msg: '10.10.30.14 → DHCPREQUEST (lease renew / system boot)' },
+      { time: '07:58:19', src: 'conn.log', msg: '10.10.30.14 → 45.77.201.6:443 4.2 KB' },
+      { time: '08:15:44', src: 'conn.log', msg: '10.10.30.14 → outlook.office365.com:443 61 KB' },
+      { time: '12:30:02', src: 'conn.log', msg: '10.10.30.14 → teams.microsoft.com:443 118 KB' },
+      { time: '08:01:47', src: 'dhcp.log', msg: '10.10.30.14 → DHCPREQUEST (lease renew / system boot)' },
+      { time: '08:02:05', src: 'conn.log', msg: '10.10.30.14 → 45.77.201.6:443 4.1 KB' },
+      { time: '09:40:11', src: 'conn.log', msg: '10.10.30.14 → sharepoint.example.com:443 44 KB' },
+      { time: '07:55:30', src: 'dhcp.log', msg: '10.10.30.14 → DHCPREQUEST (lease renew / system boot)' },
+      { time: '07:55:49', src: 'conn.log', msg: '10.10.30.14 → 45.77.201.6:443 4.3 KB' },
+      { time: '10:12:00', src: 'conn.log', msg: '10.10.30.14 → github.com:443 22 KB' },
+    ],
+    malicious: [1, 5, 8],
+    hint: 'Anchor on the <strong>DHCPREQUEST</strong> rows - they mark a reboot. Then look at what happens in the first <strong>20 seconds</strong> after each one, on all three days. Compare that to how SCN-004\'s beacon behaved: was that one tied to boot time, or did it run continuously?',
+    explanation: 'The same destination, <code>45.77.201.6</code>, appears exactly once per day - always within 20 seconds of a DHCP lease renewal that marks a fresh boot, and never again for the rest of the session. That timing is the tell. A live, memory-resident implant (like the one in SCN-004) keeps beaconing on a fixed short interval for as long as it runs; this connection goes silent for hours at a stretch and only returns after the machine restarts. That pattern only makes sense if something re-launches the payload at every startup or logon - a registry Run key or a scheduled task configured to fire "at logon" or "at startup." The three normal-looking rows (Outlook, Teams, SharePoint, GitHub) are ordinary daytime browsing spread throughout each session and are not tied to boot time at all, which is exactly the contrast an analyst should be looking for: anomalies keyed to system state, not just time of day.',
+    mitre: [
+      { id: 'T1547.001', name: 'Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder' },
+      { id: 'T1053.005', name: 'Scheduled Task/Job: Scheduled Task' },
+    ],
+    relatedTechniques: [
+      { id: 'T1543.003', name: 'Create or Modify System Process: Windows Service', note: 'an alternate mechanism for the same reboot-survival goal' },
+      { id: 'T1112', name: 'Modify Registry', note: 'broader category covering the Run key write itself' },
+    ],
+    detection: [
+      { tool: 'arkime',   label: 'Arkime',       code: 'ip.dst == 45.77.201.6 && length < 6000' },
+      { tool: 'kibana',   label: 'Kibana (KQL)', code: 'destination.ip:"45.77.201.6" AND network.bytes < 6000' },
+      { tool: 'suricata', label: 'Suricata',     code: 'alert tcp $HOME_NET any -> 45.77.201.6 any (msg:"Possible reboot-persistent beacon - recurring callout after DHCP renew"; threshold:type both, track by_src, count 2, seconds 259200; sid:1000024;)' },
+    ],
+  },
+
   {
     id: 'SCN-002',
     title: 'Anomalous DNS Activity',
@@ -875,6 +913,43 @@ const SCENARIOS = [
       { tool: 'arkime',   label: 'Arkime',       code: 'http.user-agent == "CertUtil*" || (http.user-agent == "Microsoft BITS*" && host.http != "*.windowsupdate.com") || (http.user-agent == "*WindowsPowerShell*" && http.uri == "*.ps1")' },
       { tool: 'kibana',   label: 'Kibana (KQL)', code: 'user_agent.original:(*CertUtil* OR *WindowsPowerShell* OR "Microsoft BITS*") AND NOT destination.domain:(*.microsoft.com OR *.windowsupdate.com)' },
       { tool: 'suricata', label: 'Suricata',     code: 'alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"LOLBin download - certutil URL agent"; flow:to_server; http.user_agent; content:"CertUtil"; nocase; startswith; sid:1000019;)' },
+    ],
+  },
+
+  /* ====== SCN-025 · PRIVILEGE ESCALATION · Scheduled Task ACL Abuse ====== */
+  /* ====== SCN-PRIVESC · PRIVILEGE ESCALATION · Scheduled Task ACL Abuse ====== */
+  {
+    id: 'SCN-025',
+    title: 'Scheduled Task ACL Abuse',
+    difficulty: 'MEDIUM',
+    viewType: 'logs',
+    brief: 'Backup server <strong>SRV-BKUP01 (10.10.5.15)</strong> runs a nightly maintenance task under a highly-privileged service account. Something about last night looks different from every other night. Pull the surrounding logs from both the backup server and the finance workstation that touched its script share and find the escalation.',
+    rows: [
+      { time: '22:14:03', src: 'smb.log',  msg: '10.10.20.77 → 10.10.5.20:445 (SMB) WRITE \\Scripts\\nightly-backup-helper.ps1' },
+      { time: '22:14:07', src: 'dns.log',  msg: '10.10.20.77 → query A outlook.office365.com' },
+      { time: '23:58:40', src: 'dns.log',  msg: '10.10.5.15 → query A time.windows.com' },
+      { time: '03:00:02', src: 'conn.log', msg: '10.10.5.15 → 10.10.5.20:445 (SMB) 4.4 KB' },
+      { time: '03:00:09', src: 'conn.log', msg: '10.10.5.15 → 185.212.44.9:443 65 KB' },
+      { time: '03:00:11', src: 'conn.log', msg: '10.10.5.15 → 10.10.1.10:445 (SMB) ADMIN$ 2.6 KB' },
+      { time: '03:05:00', src: 'dns.log',  msg: '10.10.5.15 → query A backup-vendor-cdn.com' },
+      { time: '03:07:22', src: 'conn.log', msg: '10.10.5.15 → 10.10.5.20:445 (SMB) 1.1 KB' },
+      { time: '08:30:11', src: 'dns.log',  msg: '10.10.20.77 → query A teams.microsoft.com' },
+    ],
+    malicious: [0, 4, 5],
+    hint: '<strong>10.10.20.77</strong> is a finance workstation - it has no business writing to an ops script share. <strong>10.10.5.15</strong> is a backup server that reads from that share every night under a service account; it should never reach the open internet or knock on a domain controller\'s admin share on its own.',
+    explanation: 'Row 01: the finance workstation writes to <code>\\Scripts\\nightly-backup-helper.ps1</code> on the ops file share - a file it has no legitimate reason to touch. That script is exactly what the backup service on SRV-BKUP01 executes every night at 03:00, under a service account with domain-wide read and backup-operator rights - far more privilege than the finance user who just modified it. At 03:00 the task fires as designed (row 04, the normal script pull), but this time it runs attacker-modified code. Two things happen that never happen on an ordinary night: the backup server, which has no reason to leave the network, reaches out to an unfamiliar external IP (row 05); and it touches the domain controller\'s admin share (row 06) using the service account\'s elevated rights. Neither action belongs to a backup job. This is not a flashy exploit - it is a misconfigured ACL: a low-privilege user could write to the input of a job that runs as something far more powerful, and the job\'s trust in its own script became the escalation path. Rows 03, 07, and 09 (the routine share read, vendor CDN check, and normal Teams DNS) are the backup job and the workstation behaving normally, included so the anomaly has to be found by behavior rather than by source IP alone.',
+    mitre: [
+      { id: 'T1053.005', name: 'Scheduled Task/Job: Scheduled Task' },
+      { id: 'T1078', name: 'Valid Accounts', note: 'the escalation rides on the backup service account\'s existing privilege, not a new credential' },
+    ],
+    relatedTechniques: [
+      { id: 'T1222', name: 'File and Directory Permissions Modification', note: 'the root cause is a writable ACL on the task\'s target script' },
+      { id: 'T1569.002', name: 'System Services: Service Execution', note: 'a misconfigured service binary path is a common variant of the same abuse' },
+    ],
+    detection: [
+      { tool: 'arkime',   label: 'Arkime',       code: 'ip.src == 10.10.5.15 && (ip.dst == 185.212.44.9 || (ip.dst == 10.10.1.10 && port.dst == 445))' },
+      { tool: 'kibana',   label: 'Kibana (KQL)', code: 'source.ip:"10.10.5.15" AND (destination.ip:"185.212.44.9" OR (destination.ip:"10.10.1.10" AND destination.port:445))' },
+      { tool: 'suricata', label: 'Suricata',     code: 'alert tcp 10.10.5.15 any -> $EXTERNAL_NET any (msg:"Backup server unexpected internet egress - possible scheduled task privilege abuse"; sid:1000025;)' },
     ],
   },
 
@@ -1281,6 +1356,7 @@ const SCENARIOS = [
       { tool: 'suricata', label: 'Suricata',     code: 'alert ip [10.20.0.0/16] any -> ![10.20.0.0/16] any (msg:"OT enclave egress - segmentation violation"; sid:1000020;)' },
     ],
   }
+
 ];
 
 /* ============================================================
