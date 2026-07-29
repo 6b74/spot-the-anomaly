@@ -575,8 +575,8 @@ const SCENARIOS = [
       { time: '10:12:00', src: 'conn.log', msg: '10.10.30.14 → github.com:443 22 KB' },
     ],
     malicious: [1, 5, 8],
-    hint: 'Anchor on the <strong>DHCPREQUEST</strong> rows - they mark a reboot. Then look at what happens in the first <strong>20 seconds</strong> after each one, on all three days. Compare that to how SCN-004\'s beacon behaved: was that one tied to boot time, or did it run continuously?',
-    explanation: 'The same destination, <code>45.77.201.6</code>, appears exactly once per day - always within 20 seconds of a DHCP lease renewal that marks a fresh boot, and never again for the rest of the session. That timing is the tell. A live, memory-resident implant (like the one in SCN-004) keeps beaconing on a fixed short interval for as long as it runs; this connection goes silent for hours at a stretch and only returns after the machine restarts. That pattern only makes sense if something re-launches the payload at every startup or logon - a registry Run key or a scheduled task configured to fire "at logon" or "at startup." The three normal-looking rows (Outlook, Teams, SharePoint, GitHub) are ordinary daytime browsing spread throughout each session and are not tied to boot time at all, which is exactly the contrast an analyst should be looking for: anomalies keyed to system state, not just time of day.',
+    hint: 'Anchor on the <strong>DHCPREQUEST</strong> rows - they mark a reboot. Then look at what happens in the first <strong>20 seconds</strong> after each one, on all three days. Compare that to how SCN-001\'s beacon behaved: was that one tied to boot time, or did it run continuously?',
+    explanation: 'The same destination, <code>45.77.201.6</code>, appears exactly once per day - always within 20 seconds of a DHCP lease renewal that marks a fresh boot, and never again for the rest of the session. That timing is the tell. A live, memory-resident implant (like the one in SCN-001) keeps beaconing on a fixed short interval for as long as it runs; this connection goes silent for hours at a stretch and only returns after the machine restarts. That pattern only makes sense if something re-launches the payload at every startup or logon - a registry Run key or a scheduled task configured to fire "at logon" or "at startup." The three normal-looking rows (Outlook, Teams, SharePoint, GitHub) are ordinary daytime browsing spread throughout each session and are not tied to boot time at all, which is exactly the contrast an analyst should be looking for: anomalies keyed to system state, not just time of day.',
     mitre: [
       { id: 'T1547.001', name: 'Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder' },
       { id: 'T1053.005', name: 'Scheduled Task/Job: Scheduled Task' },
@@ -589,6 +589,151 @@ const SCENARIOS = [
       { tool: 'arkime',   label: 'Arkime',       code: 'ip.dst == 45.77.201.6 && length < 6000' },
       { tool: 'kibana',   label: 'Kibana (KQL)', code: 'destination.ip:"45.77.201.6" AND network.bytes < 6000' },
       { tool: 'suricata', label: 'Suricata',     code: 'alert tcp $HOME_NET any -> 45.77.201.6 any (msg:"Possible reboot-persistent beacon - recurring callout after DHCP renew"; threshold:type both, track by_src, count 2, seconds 259200; sid:1000024;)' },
+    ],
+  },
+
+  /* ====== SCN-026 · CREDENTIAL ACCESS · Password Spray ====== */
+  {
+    id: 'SCN-026',
+    title: 'Password Spray',
+    difficulty: 'EASY',
+    viewType: 'logs',
+    brief: 'VPN and portal authentication logs for the morning. The account-lockout alerts never fired, but the SOC wants a second look at <strong>failed logins</strong>. Find the credential attack hiding in plain sight and the account it compromised.',
+    rows: [
+      { time: '02:03:11', src: 'vpn.log',  msg: '198.51.100.7 → SUCCESS user jdoe (MFA satisfied)' },
+      { time: '02:14:02', src: 'auth.log', msg: '185.220.101.44 → FAILURE user aallen (bad password)' },
+      { time: '02:14:09', src: 'auth.log', msg: '185.220.101.44 → FAILURE user bcarter (bad password)' },
+      { time: '02:14:15', src: 'auth.log', msg: '185.220.101.44 → FAILURE user cdiaz (bad password)' },
+      { time: '02:14:22', src: 'auth.log', msg: '185.220.101.44 → FAILURE user dedwards (bad password)' },
+      { time: '02:14:29', src: 'auth.log', msg: '185.220.101.44 → FAILURE user efranklin (bad password)' },
+      { time: '02:14:36', src: 'auth.log', msg: '185.220.101.44 → FAILURE user ggomez (bad password)' },
+      { time: '02:14:44', src: 'auth.log', msg: '185.220.101.44 → SUCCESS user hhughes (password accepted)' },
+      { time: '02:15:50', src: 'auth.log', msg: '10.10.20.31 → FAILURE user tmiller (bad password)' },
+      { time: '02:15:58', src: 'auth.log', msg: '10.10.20.31 → SUCCESS user tmiller (MFA satisfied)' },
+      { time: '02:22:03', src: 'auth.log', msg: '185.220.101.44 → FAILURE user kkhan (bad password)' },
+      { time: '02:22:10', src: 'auth.log', msg: '185.220.101.44 → FAILURE user llopez (bad password)' },
+    ],
+    malicious: [1, 2, 3, 4, 5, 6, 7, 10, 11],
+    hint: 'Group the failures by <strong>source</strong>, not by account. A brute force hammers one account with many guesses; a spray tries one guess against many accounts. That is why lockout never tripped - each account only saw a single failure. Then look for the one <strong>SUCCESS</strong> from the same source.',
+    explanation: 'A single external source, <code>185.220.101.44</code>, attempted one authentication each against nine different accounts inside a few minutes - the signature of a password spray. Because each account individually saw only one failed login, per-account lockout thresholds never triggered; the pattern is only visible when you pivot on the source address and count how many distinct accounts it touched. One guess landed: <code>hhughes</code> had a weak or reused password and the source got a SUCCESS, handing the attacker a valid account. The trap is rows 09-10: <code>tmiller</code> failed once then succeeded from an internal address against their own account, which is ordinary fat-fingering and must not be flagged. The lesson for newer analysts: depth-based detections (many failures on one account) are blind to breadth-based attacks (one failure across many accounts), so hunt failed authentications grouped by source IP and by distinct-account count, and treat a success mixed into that spray as a compromise until proven otherwise.',
+    mitre: [
+      { id: 'T1110.003', name: 'Brute Force: Password Spraying' },
+      { id: 'T1078',     name: 'Valid Accounts' },
+    ],
+    relatedTechniques: [
+      { id: 'T1110.001', name: 'Brute Force: Password Guessing', note: 'the depth-based cousin that lockout policies actually catch' },
+      { id: 'T1589.003', name: 'Gather Victim Identity Information: Employee Names', note: 'how the attacker built the account list to spray against' },
+    ],
+    detection: [
+      { tool: 'arkime',   label: 'Arkime',       code: 'ip.src == 185.220.101.44 && port.dst == 443' },
+      { tool: 'kibana',   label: 'Kibana (KQL)', code: 'event.outcome:"failure" AND source.ip:"185.220.101.44"  // then aggregate: distinct count of user.name' },
+      { tool: 'suricata', label: 'Suricata',     code: 'alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"Possible password spray - many failed auths from one source"; flow:to_server; http.uri; content:"/auth"; threshold:type both, track by_src, count 8, seconds 300; sid:1000026;)' },
+    ],
+  },
+
+  /* ====== SCN-027 · CREDENTIAL ACCESS · Rogue DHCP and DNS Hijack ====== */
+  {
+    id: 'SCN-027',
+    title: 'Rogue DHCP and DNS Hijack',
+    difficulty: 'EASY',
+    viewType: 'logs',
+    brief: 'A user segment monitor captured DHCP and DNS activity after a few workstations reported "certificate warnings" on the Microsoft sign-in page. The authorized DHCP server is <strong>10.10.0.1</strong> and the only sanctioned resolver is <strong>10.10.0.10</strong>. Find the rogue infrastructure.',
+    rows: [
+      { time: '08:01:02', src: 'dhcp.log', msg: '10.10.0.1 → DHCPOFFER to 3c:5a:b4:11 (client 10.10.20.51) DNS=10.10.0.10' },
+      { time: '08:01:02', src: 'dhcp.log', msg: '10.10.4.66 → DHCPOFFER to 3c:5a:b4:11 (client 10.10.20.51) DNS=10.10.4.66' },
+      { time: '08:01:03', src: 'dhcp.log', msg: '10.10.20.51 → DHCPREQUEST (accepted offer from 10.10.4.66)' },
+      { time: '08:03:11', src: 'dns.log',  msg: '10.10.20.51 → query A login.microsoftonline.com @10.10.4.66 → answer 45.13.94.7' },
+      { time: '08:03:12', src: 'dns.log',  msg: '10.10.20.52 → query A intranet.example.com @10.10.0.10 → answer 10.10.5.20' },
+      { time: '08:03:40', src: 'dns.log',  msg: '10.10.20.51 → query A outlook.office365.com @10.10.4.66 → answer 45.13.94.7' },
+      { time: '08:04:02', src: 'dns.log',  msg: '10.10.20.55 → query A github.com @10.10.0.10 → answer 140.82.112.3' },
+      { time: '08:05:19', src: 'conn.log', msg: '10.10.20.51 → 45.13.94.7:443 (TLS) 62 KB' },
+      { time: '08:06:00', src: 'dhcp.log', msg: '10.10.0.1 → DHCPACK to 6b:74:aa:02 (client 10.10.20.60) DNS=10.10.0.10' },
+    ],
+    malicious: [1, 2, 3, 5, 7],
+    hint: 'There should be exactly <strong>one</strong> authorized DHCP server and a known set of resolvers. Watch for a <strong>second DHCPOFFER</strong> on the segment, note which DNS server the client is told to use, then check whether that resolver returns the <strong>right</strong> answers for well-known domains.',
+    explanation: 'A rogue host, <code>10.10.4.66</code>, answered a client DHCP discovery alongside the authorized server <code>10.10.0.1</code> and won the race, handing the client itself as the DNS resolver instead of the sanctioned <code>10.10.0.10</code>. With the client now trusting the attacker for name resolution, two lookups for Microsoft sign-in domains (<code>login.microsoftonline.com</code> and <code>outlook.office365.com</code>) both resolved to the same attacker-controlled address <code>45.13.94.7</code> - the tell-tale sign of DNS hijacking staged for an adversary-in-the-middle credential capture, which is exactly why users saw certificate warnings. The victim then connected to that address on 443 believing it was Microsoft. The benign rows show other clients using the correct resolver (<code>10.10.0.10</code>) and getting correct answers, plus a normal DHCPACK from the authorized server. Lesson: baseline your DHCP servers and resolvers - a second DHCP responder, or an unexpected resolver IP handed out in a lease, is a rogue-infrastructure red flag, and two unrelated domains resolving to one IP is poisoning.',
+    mitre: [
+      { id: 'T1557.003', name: 'Adversary-in-the-Middle: DHCP Spoofing' },
+      { id: 'T1040',     name: 'Network Sniffing' },
+    ],
+    relatedTechniques: [
+      { id: 'T1557.001', name: 'Adversary-in-the-Middle: LLMNR/NBT-NS Poisoning and SMB Relay', note: 'same AiTM goal reached by poisoning name resolution at a different layer' },
+      { id: 'T1071.001', name: 'Application Layer Protocol: Web Protocols', note: 'the follow-on credential capture the redirected TLS session enables' },
+    ],
+    detection: [
+      { tool: 'arkime',   label: 'Arkime',       code: 'ip.src == 10.10.4.66 && port.dst == 68' },
+      { tool: 'kibana',   label: 'Kibana (KQL)', code: 'dhcp.type:"offer" AND NOT source.ip:"10.10.0.1"' },
+      { tool: 'suricata', label: 'Suricata',     code: 'alert udp !10.10.0.1 67 -> $HOME_NET 68 (msg:"Rogue DHCP - OFFER from unauthorized server"; sid:1000027;)' },
+    ],
+  },
+
+  /* ====== SCN-028 · DEFENSE EVASION · NTP Time-Source Tampering ====== */
+  {
+    id: 'SCN-028',
+    title: 'NTP Time-Source Tampering',
+    difficulty: 'EASY',
+    viewType: 'logs',
+    brief: 'Time-sync and connection logs from a workstation segment. Every host is expected to sync to the internal NTP server <strong>10.10.0.10</strong>. One host is not - and its clock did something it should never do on its own. Find it, and reason about why an attacker would want it.',
+    rows: [
+      { time: '06:00:04', src: 'ntp.log',  msg: '10.10.20.52 → NTP sync 10.10.0.10 (offset +0.012s)' },
+      { time: '06:00:07', src: 'ntp.log',  msg: '10.10.20.53 → NTP sync 10.10.0.10 (offset -0.008s)' },
+      { time: '06:12:33', src: 'ntp.log',  msg: '10.10.20.51 → NTP query 91.121.88.10:123 (external, unapproved source)' },
+      { time: '06:12:34', src: 'ntp.log',  msg: '10.10.20.51 → clock step +02:57:12 applied' },
+      { time: '06:12:40', src: 'conn.log', msg: '10.10.20.51 → 10.10.1.10:88 (Kerberos) 3.1 KB' },
+      { time: '06:15:02', src: 'ntp.log',  msg: '10.10.20.55 → NTP sync 10.10.0.10 (offset +0.004s)' },
+      { time: '06:20:11', src: 'auth.log', msg: '10.10.20.51 → local event timestamps now ~2h57m ahead of DC-logged time' },
+      { time: '06:44:00', src: 'ntp.log',  msg: '10.10.20.51 → NTP query 91.121.88.10:123 (re-sync to unapproved source)' },
+    ],
+    malicious: [2, 3, 4, 6, 7],
+    hint: 'Almost nobody baselines <strong>time</strong>. Every host here syncs to the internal server (<code>10.10.0.10</code>) except one, which reached an <strong>external, unapproved</strong> time source and then stepped its clock by hours. Ask what a large clock change buys an attacker: broken log correlation, and room to play games with <strong>Kerberos</strong> ticket windows.',
+    explanation: 'One workstation, <code>10.10.20.51</code>, stopped using the sanctioned internal NTP server and queried an external, unapproved time source, then applied a clock step of nearly three hours. Every other host on the segment stayed within milliseconds of the internal server, which makes the outlier obvious the moment you baseline the expected time source. A large, deliberate clock shift is security-relevant for two reasons the log shows: the host\'s subsequent entries no longer line up with the domain controller\'s timeline, sabotaging correlation during an investigation; and the Kerberos exchange immediately afterward (to the DC on 88) is a hint the skew is being used against ticket validity, since Kerberos tolerates only a few minutes of clock difference and shifting time can help extend or replay authentication material. ATT&CK has no dedicated NTP technique, which is part of why this goes unhunted - treat it as defense evasion. Baseline authorized time sources and alert on any host talking NTP (udp/123) to anything but them, and on any clock step larger than a second or two.',
+    mitre: [
+      { id: 'T1562', name: 'Impair Defenses', note: 'manipulating time to break log correlation and detection timelines' },
+      { id: 'T1124', name: 'System Time Discovery', note: 'learning current time and skew tolerance before manipulating it' },
+    ],
+    relatedTechniques: [
+      { id: 'T1070.006', name: 'Indicator Removal: Timestomp', note: 'the file-timestamp cousin; system-clock tampering is the network-time analogue' },
+      { id: 'T1558', name: 'Steal or Forge Kerberos Tickets', note: 'clock skew can aid ticket-lifetime abuse and replay' },
+    ],
+    detection: [
+      { tool: 'arkime',   label: 'Arkime',       code: 'port.dst == 123 && ip.dst != 10.10.0.10' },
+      { tool: 'kibana',   label: 'Kibana (KQL)', code: 'network.protocol:"ntp" AND NOT destination.ip:"10.10.0.10"' },
+      { tool: 'suricata', label: 'Suricata',     code: 'alert udp $HOME_NET any -> !10.10.0.10 123 (msg:"NTP sync to unauthorized time source"; sid:1000028;)' },
+    ],
+  },
+
+  /* ====== SCN-029 · COMMAND & CONTROL · Suspicious TLS Certificate ====== */
+  {
+    id: 'SCN-029',
+    title: 'Suspicious TLS Certificate',
+    difficulty: 'EASY',
+    viewType: 'logs',
+    brief: 'Zeek <code>ssl.log</code> for outbound TLS. Most sessions present valid certificates from known CAs that match where the traffic is going. Two do not. Find the command-and-control and the phishing infrastructure by reading the <strong>certificate</strong>, not the destination.',
+    rows: [
+      { time: '10:02:11', src: 'ssl.log', msg: '10.10.20.31 → 140.82.112.3:443 SNI=github.com CN=github.com issuer="DigiCert" valid=380d' },
+      { time: '10:03:02', src: 'ssl.log', msg: '10.10.20.31 → 13.107.6.152:443 SNI=outlook.office365.com CN=*.office365.com issuer="Microsoft RSA TLS CA" valid=365d' },
+      { time: '10:05:44', src: 'ssl.log', msg: '10.10.20.42 → 45.86.230.7:443 SNI=(none) CN=WIN-7F3K2QO issuer=WIN-7F3K2QO (self-signed) valid=3650d' },
+      { time: '10:07:20', src: 'ssl.log', msg: '10.10.20.55 → 172.217.164.100:443 SNI=www.google.com CN=www.google.com issuer="Google Trust Services" valid=90d' },
+      { time: '10:09:33', src: 'ssl.log', msg: '10.10.20.42 → 91.242.217.19:443 SNI=login-portal-sso.com CN=login-portal-sso.com issuer="Let\'s Encrypt" valid=90d issued=40m ago' },
+      { time: '10:11:02', src: 'ssl.log', msg: '10.10.20.31 → 13.107.6.152:443 SNI=teams.microsoft.com CN=*.microsoft.com issuer="Microsoft RSA TLS CA" valid=365d' },
+      { time: '10:14:41', src: 'ssl.log', msg: '10.10.20.42 → 45.86.230.7:443 SNI=(none) CN=WIN-7F3K2QO issuer=WIN-7F3K2QO (self-signed) valid=3650d' },
+      { time: '10:18:00', src: 'ssl.log', msg: '10.10.20.66 → 52.96.7.44:443 SNI=outlook.office365.com CN=*.office365.com issuer="Microsoft RSA TLS CA" valid=365d' },
+    ],
+    malicious: [2, 4, 6],
+    hint: 'Read the certificate fields Zeek hands you: <strong>issuer</strong>, subject <strong>CN</strong>, the <strong>validity window</strong>, and whether it is <strong>self-signed</strong>. Two tells to internalize: a self-signed cert with a random-looking CN on a connection to a bare IP with no SNI, and a freshly issued cert (minted minutes ago) on a lookalike domain.',
+    explanation: 'Two outbound TLS sessions stand out on certificate content, not on destination reputation. Host <code>10.10.20.42</code> connected to a bare IP (<code>45.86.230.7</code>) with no SNI, presenting a self-signed certificate whose issuer and subject are the same random host string (<code>WIN-7F3K2QO</code>) with a suspicious 10-year validity - the default shape of Cobalt Strike and Metasploit listeners - and it repeats later like a beacon. The same host also reached <code>login-portal-sso.com</code>, a single-sign-on lookalike whose Let\'s Encrypt certificate was issued only forty minutes earlier; a legitimate CA signature does not make a forty-minute-old certificate on a credential-themed lookalike domain trustworthy, and that is exactly what throwaway phishing and C2 infrastructure looks like. The benign sessions all present long-lived certs from CAs that match well-known destinations (GitHub, Microsoft, Google) with a subject CN consistent with the SNI. Lesson for newer analysts: pivot on ssl.log fields - self-signed status, issuer, CN versus SNI mismatch, and certificate age - because attacker infrastructure is often betrayed by its certificate long before its payload is.',
+    mitre: [
+      { id: 'T1071.001', name: 'Application Layer Protocol: Web Protocols' },
+      { id: 'T1573.002', name: 'Encrypted Channel: Asymmetric Cryptography' },
+    ],
+    relatedTechniques: [
+      { id: 'T1587.003', name: 'Develop Capabilities: Digital Certificates', note: 'the self-signed cert an operator generates for a default listener' },
+      { id: 'T1588.004', name: 'Obtain Capabilities: Digital Certificates', note: 'the freshly minted CA cert on the lookalike phishing domain' },
+    ],
+    detection: [
+      { tool: 'arkime',   label: 'Arkime',       code: 'cert.subjectCN == cert.issuerCN' },
+      { tool: 'kibana',   label: 'Kibana (KQL)', code: 'tls.server.x509.issuer.common_name:"WIN-7F3K2QO" OR tls.server.hash.sha256:* AND tls.server.not_before >= now-1h' },
+      { tool: 'suricata', label: 'Suricata',     code: 'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"Self-signed TLS certificate - possible C2 listener"; tls.subject; content:"CN=WIN-"; sid:1000029;)' },
     ],
   },
 
@@ -950,6 +1095,42 @@ const SCENARIOS = [
       { tool: 'arkime',   label: 'Arkime',       code: 'ip.src == 10.10.5.15 && (ip.dst == 185.212.44.9 || (ip.dst == 10.10.1.10 && port.dst == 445))' },
       { tool: 'kibana',   label: 'Kibana (KQL)', code: 'source.ip:"10.10.5.15" AND (destination.ip:"185.212.44.9" OR (destination.ip:"10.10.1.10" AND destination.port:445))' },
       { tool: 'suricata', label: 'Suricata',     code: 'alert tcp 10.10.5.15 any -> $EXTERNAL_NET any (msg:"Backup server unexpected internet egress - possible scheduled task privilege abuse"; sid:1000025;)' },
+    ],
+  },
+
+  /* ====== SCN-030 · PERSISTENCE · OAuth Consent-Grant Abuse ====== */
+  {
+    id: 'SCN-030',
+    title: 'OAuth Consent-Grant Abuse',
+    difficulty: 'MEDIUM',
+    viewType: 'logs',
+    brief: 'Cloud audit and sign-in logs from the M365 tenant. A user was phished, the helpdesk reset their password, and the case was closed - but mail is still leaving the mailbox. Follow the <strong>OAuth grant</strong>, not the login, and explain why the password reset did nothing.',
+    rows: [
+      { time: '11:02:10', src: 'audit.log',  msg: 'user jchen → OAuth consent granted to app "Teams" (scopes: User.Read) from 10.10.20.31' },
+      { time: '11:14:33', src: 'audit.log',  msg: 'user rsmith → redirected to consent prompt for app "Q4 Report Viewer" (publisher: unverified)' },
+      { time: '11:14:51', src: 'audit.log',  msg: 'user rsmith → OAuth consent GRANTED to "Q4 Report Viewer" (scopes: Mail.Read, Mail.Send, Files.Read.All, offline_access) from 185.107.56.22' },
+      { time: '11:15:20', src: 'signin.log', msg: 'service principal "Q4 Report Viewer" → refresh token issued for rsmith' },
+      { time: '11:18:02', src: 'graph.log',  msg: 'app "Q4 Report Viewer" → GET /me/messages (read 240 items) src 185.107.56.22' },
+      { time: '11:40:00', src: 'audit.log',  msg: 'admin → password reset for rsmith (helpdesk ticket: suspected phishing)' },
+      { time: '11:41:15', src: 'signin.log', msg: 'user rsmith → interactive sign-in SUCCESS (new password, MFA satisfied) from 10.10.20.31' },
+      { time: '12:05:30', src: 'graph.log',  msg: 'app "Q4 Report Viewer" → GET /me/messages + POST /sendMail src 185.107.56.22' },
+      { time: '12:30:00', src: 'audit.log',  msg: 'user tng → OAuth consent granted to app "Adobe Acrobat" (scopes: Files.Read) from 10.10.20.55' },
+    ],
+    malicious: [2, 3, 4, 7],
+    hint: 'This is an identity attack your packet sensors barely see. The tells: consent to an <strong>unverified</strong> app requesting broad <strong>Mail/Files</strong> scopes plus <strong>offline_access</strong> (which mints a refresh token), token use from a foreign IP, and - the clincher - the app still pulling mail <strong>after</strong> the password reset. An OAuth refresh token is independent of the password.',
+    explanation: '<code>rsmith</code> fell for a consent-phishing lure and granted an unverified OAuth application, "Q4 Report Viewer," a dangerous scope set: <code>Mail.Read</code>, <code>Mail.Send</code>, <code>Files.Read.All</code>, and <code>offline_access</code>. The last one is critical - <code>offline_access</code> issues a long-lived refresh token, so the app can mint new access tokens indefinitely without the user\'s password or MFA. The service principal immediately used that token to bulk-read the mailbox through the Graph API from the same foreign address that hosted the lure, and - the decisive signal - it kept reading and sending mail after the helpdesk reset the password, because a refresh token is not tied to the password and a reset does not revoke it. The benign grants are the contrast: Teams (a Microsoft first-party app, <code>User.Read</code> only) and Adobe Acrobat (a known app with a single scoped permission) from internal addresses are normal consent events. The lesson: this is application-based persistence, and the whole attack lives in the identity audit log rather than on the wire - password resets and MFA do not remediate it. You must revoke the app\'s consent and its refresh tokens, then audit everything the token already touched.',
+    mitre: [
+      { id: 'T1528',     name: 'Steal Application Access Token' },
+      { id: 'T1550.001', name: 'Use Alternate Authentication Material: Application Access Token' },
+    ],
+    relatedTechniques: [
+      { id: 'T1566.002', name: 'Phishing: Spearphishing Link', note: 'the consent-phishing lure that delivered the user to the grant prompt' },
+      { id: 'T1078.004', name: 'Valid Accounts: Cloud Accounts', note: 'the refresh token functions as durable valid cloud access' },
+    ],
+    detection: [
+      { tool: 'arkime',   label: 'Arkime',       code: 'ip.dst == 185.107.56.22  // near-blind to the abuse; only the lure/token-use IP shows on the wire' },
+      { tool: 'kibana',   label: 'Kibana (KQL)', code: 'event.action:"Consent to application" AND oauth.scope:("offline_access" OR "Mail.*" OR "Files.Read.All") AND NOT app.publisher_verified:true' },
+      { tool: 'suricata', label: 'Suricata',     code: 'alert tls $HOME_NET any -> 185.107.56.22 any (msg:"Connection to consent-phishing infrastructure - identity abuse not visible on wire"; sid:1000030;)' },
     ],
   },
 
@@ -1356,6 +1537,7 @@ const SCENARIOS = [
       { tool: 'suricata', label: 'Suricata',     code: 'alert ip [10.20.0.0/16] any -> ![10.20.0.0/16] any (msg:"OT enclave egress - segmentation violation"; sid:1000020;)' },
     ],
   }
+
 
 ];
 
